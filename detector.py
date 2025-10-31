@@ -7,7 +7,7 @@ Created on Thu Nov 14 22:58:22 2024
 
 import cv2
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from threading import Thread
 from PIL import Image, ImageTk  # Para convertir frames en imágenes compatibles con tkinter
 import os
@@ -15,6 +15,9 @@ import datetime
 import queue
 import time
 import numpy as np
+import ffmpeg
+import subprocess
+import tempfile
 
 # Función para leer el archivo de configuración
 def leer_camaras(archivo):
@@ -53,12 +56,18 @@ class Camara:
         self.ultimo_segmento = 0
         self.segmento_actual = None
 
+        # Variables para audio
+        self.audio_process = None
+        self.audio_temp_file = None
+        self.has_audio = None  # Cache para saber si la cámara tiene audio
+
     def iniciar(self):
         Thread(target=self.capturar_video, daemon=True).start()
         self.root.after(100, self.mostrar_video)  # Iniciar mostrar_video en el hilo principal
 
     def capturar_video(self):
         frame_count = 0
+        ultimo_refresh = time.time()
         while self.running:
             try:
                 ret, frame = self.cap.read()
@@ -70,6 +79,15 @@ class Camara:
                     continue
 
                 tiempo_actual = time.time()
+
+                # Refresh periódico del stream para evitar congelamiento (cada 30 minutos)
+                if tiempo_actual - ultimo_refresh > 1800:  # 30 minutos
+                    print(f"[Stream] Refrescando stream de {self.nombre}")
+                    self.cap.release()
+                    time.sleep(0.5)
+                    self.cap = cv2.VideoCapture(self.url)
+                    ultimo_refresh = tiempo_actual
+                    continue  # Saltar al siguiente ciclo después del refresh
 
                 # Manejar grabación según el modo configurado
                 if self.config['modo_grabacion'] == 'motion':
@@ -191,10 +209,19 @@ class Camara:
         if not self.grabando:
             self.grabando = True
             Thread(target=self.grabar_video, args=(frame_inicial,)).start()
+            self.iniciar_grabacion_audio()
 
     def iniciar_grabacion_continua(self, frame_inicial):
+        # Detener grabación de audio anterior si existe
+        if self.audio_process:
+            self.detener_grabacion_audio()
+
         if self.segmento_actual:
             self.segmento_actual.release()
+            # Combinar audio con el segmento anterior si existe
+            if hasattr(self, 'ultimo_video_segmento') and self.ultimo_video_segmento:
+                self.combinar_audio_video(self.ultimo_video_segmento)
+
         carpeta = f"./videos/{self.nombre}"
         os.makedirs(carpeta, exist_ok=True)
         fecha = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -202,7 +229,9 @@ class Camara:
 
         fourcc = cv2.VideoWriter_fourcc(*'XVID')
         self.segmento_actual = cv2.VideoWriter(archivo_salida, fourcc, 20.0, (frame_inicial.shape[1], frame_inicial.shape[0]))
+        self.ultimo_video_segmento = archivo_salida  # Guardar para combinar con audio después
         print(f"[Grabación] Iniciando segmento continuo en {self.nombre}: {archivo_salida}")
+        self.iniciar_grabacion_audio_continua()
 
     def grabar_video(self, frame_inicial):
         carpeta = f"./videos/{self.nombre}"
@@ -236,6 +265,8 @@ class Camara:
 
         out.release()
         cap_grabacion.release()
+        self.detener_grabacion_audio()
+        self.combinar_audio_video(archivo_salida)
         self.grabando = False
         print(f"[Grabación] Finalizada en {self.nombre}: {archivo_salida}")
 
@@ -245,6 +276,158 @@ class Camara:
                 self.segmento_actual.write(frame)
             except Exception as e:
                 print(f"[Error] Error al escribir frame continuo en {self.nombre}: {e}")
+
+    def detectar_audio(self):
+        """Detecta si la cámara tiene audio disponible."""
+        if self.has_audio is not None:
+            return self.has_audio
+
+        try:
+            # Verificar si ffmpeg está disponible
+            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print(f"[Audio] FFmpeg no está instalado. No se puede detectar audio en {self.nombre}")
+            self.has_audio = False
+            return False
+
+        try:
+            # Intentar obtener información del stream con ffmpeg
+            cmd = ['ffmpeg', '-i', self.url, '-f', 'null', '-']
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+            # Si ffmpeg puede acceder al stream sin errores de audio, asumimos que tiene audio
+            if 'Audio:' in result.stderr or 'audio:' in result.stderr.lower():
+                self.has_audio = True
+                print(f"[Audio] Cámara {self.nombre} tiene audio disponible")
+                return True
+            else:
+                self.has_audio = False
+                print(f"[Audio] Cámara {self.nombre} no tiene audio")
+                return False
+        except subprocess.TimeoutExpired:
+            print(f"[Audio] Timeout al detectar audio en {self.nombre}")
+            self.has_audio = False
+            return False
+        except Exception as e:
+            print(f"[Audio] Error al detectar audio en {self.nombre}: {e}")
+            self.has_audio = False
+            return False
+
+    def iniciar_grabacion_audio(self):
+        try:
+            # Verificar si la cámara tiene audio
+            if not self.detectar_audio():
+                print(f"[Audio] Omitiendo grabación de audio en {self.nombre} (sin audio)")
+                self.audio_process = None
+                return
+
+            carpeta = f"./videos/{self.nombre}"
+            os.makedirs(carpeta, exist_ok=True)
+            fecha = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.audio_temp_file = f"{carpeta}/temp_audio_{fecha}.aac"
+
+            # Usar ffmpeg para capturar audio del stream RTSP
+            cmd = [
+                'ffmpeg', '-y', '-i', self.url, '-vn', '-acodec', 'aac',
+                '-b:a', '128k', '-f', 'adts', self.audio_temp_file
+            ]
+
+            self.audio_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"[Audio] Iniciando grabación de audio en {self.nombre}")
+        except Exception as e:
+            print(f"[Error] No se pudo iniciar grabación de audio en {self.nombre}: {e}")
+            self.audio_process = None
+
+    def iniciar_grabacion_audio_continua(self):
+        try:
+            # Verificar si la cámara tiene audio
+            if not self.detectar_audio():
+                print(f"[Audio] Omitiendo grabación continua de audio en {self.nombre} (sin audio)")
+                self.audio_process = None
+                return
+
+            carpeta = f"./videos/{self.nombre}"
+            os.makedirs(carpeta, exist_ok=True)
+            fecha = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.audio_temp_file = f"{carpeta}/temp_audio_continuo_{fecha}.aac"
+
+            cmd = [
+                'ffmpeg', '-y', '-i', self.url, '-vn', '-acodec', 'aac',
+                '-b:a', '128k', '-f', 'adts', self.audio_temp_file
+            ]
+
+            self.audio_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"[Audio] Iniciando grabación continua de audio en {self.nombre}")
+        except Exception as e:
+            print(f"[Error] No se pudo iniciar grabación continua de audio en {self.nombre}: {e}")
+            self.audio_process = None
+
+    def detener_grabacion_audio(self):
+        if self.audio_process:
+            try:
+                self.audio_process.terminate()
+                self.audio_process.wait(timeout=5)
+                print(f"[Audio] Grabación de audio detenida")
+            except subprocess.TimeoutExpired:
+                print(f"[Audio] Timeout al detener grabación de audio, forzando cierre")
+                try:
+                    self.audio_process.kill()
+                    self.audio_process.wait(timeout=2)
+                except:
+                    pass
+            except Exception as e:
+                print(f"[Error] Error al detener grabación de audio: {e}")
+                try:
+                    self.audio_process.kill()
+                except:
+                    pass
+            self.audio_process = None
+
+    def combinar_audio_video(self, video_file):
+        if not self.audio_temp_file or not os.path.exists(self.audio_temp_file):
+            print(f"[Audio] No hay archivo de audio para combinar con {video_file}")
+            return
+
+        try:
+            # Verificar si el archivo de audio tiene contenido
+            if os.path.getsize(self.audio_temp_file) == 0:
+                print(f"[Audio] Archivo de audio vacío, guardando solo video: {video_file}")
+                try:
+                    os.remove(self.audio_temp_file)
+                except:
+                    pass
+                self.audio_temp_file = None
+                return
+
+            # Crear archivo de salida con audio
+            video_con_audio = video_file.replace('.avi', '_con_audio.mp4')
+
+            # Usar ffmpeg para combinar video y audio
+            cmd = [
+                'ffmpeg', '-y', '-i', video_file, '-i', self.audio_temp_file,
+                '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', video_con_audio
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode == 0:
+                # Si la combinación fue exitosa, reemplazar el archivo original
+                os.replace(video_con_audio, video_file)
+                print(f"[Audio] Audio combinado exitosamente en {video_file}")
+            else:
+                print(f"[Error] Error al combinar audio: {result.stderr}")
+                # Mantener el archivo de video original si falla la combinación
+
+            # Limpiar archivo temporal de audio
+            try:
+                os.remove(self.audio_temp_file)
+            except:
+                pass
+
+        except Exception as e:
+            print(f"[Error] Error al combinar audio y video: {e}")
+        finally:
+            self.audio_temp_file = None
 
 # Clase principal para la interfaz de usuario
 class Aplicacion:
@@ -404,6 +587,14 @@ class Aplicacion:
             # Cerrar grabación continua si está activa
             if hasattr(camara, 'segmento_actual') and camara.segmento_actual:
                 camara.segmento_actual.release()
+            # Detener grabación de audio
+            camara.detener_grabacion_audio()
+
+    def confirmar_cierre(self):
+        if messagebox.askyesno("Confirmar cierre", "¿Está seguro de que desea cerrar la aplicación?\n\nEsto detendrá todas las cámaras y grabaciones en curso."):
+            self.detener_camaras()
+            self.root.destroy()
+        # Si el usuario cancela, no hacer nada (la aplicación continúa ejecutándose)
 
     def abrir_ventana_completa(self, camara):
         ventana = tk.Toplevel(self.root)
@@ -487,5 +678,5 @@ os.makedirs("./videos", exist_ok=True)
 if __name__ == "__main__":
     root = tk.Tk()
     app = Aplicacion(root)
-    root.protocol("WM_DELETE_WINDOW", lambda: (app.detener_camaras(), root.destroy()))
+    root.protocol("WM_DELETE_WINDOW", app.confirmar_cierre)
     root.mainloop()

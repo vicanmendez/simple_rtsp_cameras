@@ -6,10 +6,13 @@ Un sistema de monitoreo de cámaras de seguridad basado en Python con detección
 
 - **Streaming RTSP multi-cámara**: Monitorea múltiples cámaras IP simultáneamente
 - **Detección de movimiento**: Detección automática de movimiento con sensibilidad configurable
-- **Grabación de video**: Graba clips de video cuando se detecta movimiento
+- **Grabación de video con audio**: Graba clips de video con audio sincronizado cuando se detecta movimiento
 - **Gestión de cámaras**: Agrega, edita y elimina streams de cámaras a través de la interfaz gráfica
 - **Vista en pantalla completa**: Haz doble clic en cualquier cámara para verla en modo pantalla completa
 - **Operación segura con hilos**: Reproducción de video fluida sin congelar la interfaz
+- **Modos de grabación flexibles**: Por movimiento, continua o sin grabación
+- **Confirmación de cierre**: Diálogo de confirmación al cerrar la aplicación para evitar cierres accidentales
+- **Captura de audio**: Registra audio junto con video para grabaciones completas
 
 ## Requisitos
 
@@ -17,15 +20,22 @@ Un sistema de monitoreo de cámaras de seguridad basado en Python con detección
 - OpenCV (`pip install opencv-python`)
 - Pillow (`pip install pillow`)
 - NumPy (`pip install numpy`)
+- FFmpeg (debe estar instalado en el sistema)
+- ffmpeg-python (`pip install ffmpeg-python`)
+- pydub (`pip install pydub`)
 
 ## Instalación
 
 1. Clona o descarga los archivos del proyecto
-2. Instala las dependencias requeridas:
+2. **Instala FFmpeg** (requerido para captura de audio):
+   - **Windows**: Descarga desde https://ffmpeg.org/download.html y agrega al PATH
+   - **Linux**: `sudo apt install ffmpeg`
+   - **macOS**: `brew install ffmpeg`
+3. Instala las dependencias requeridas:
    ```bash
    pip install -r requirements.txt
    ```
-3. Coloca las URLs RTSP de tus cámaras en `camaras.txt`, separadas por comas
+4. Coloca las URLs RTSP de tus cámaras en `camaras.txt`, separadas por comas
 
 ## Uso
 
@@ -117,6 +127,8 @@ Herramientas como ONVIF Device Manager (ODM) pueden ayudar a descubrir y configu
 - **Detección de movimiento poco sensible**: Disminuye los valores de umbral y área mínima
 - **La grabación no funciona**: Asegúrate de tener permisos de escritura en el directorio `videos/`
 - **Interfaz gráfica se congela**: La aplicación usa hilos para prevenir congelamientos durante el streaming
+- **Audio no se captura**: Verifica que FFmpeg esté instalado y en el PATH del sistema
+- **Error al combinar audio**: Puede ocurrir si el stream RTSP no tiene audio o hay problemas de sincronización
 
 ## Notas de Seguridad
 
@@ -124,6 +136,14 @@ Herramientas como ONVIF Device Manager (ODM) pueden ayudar a descubrir y configu
 - Usa HTTPS cuando sea posible para las interfaces web
 - Mantén actualizada la aplicación y las dependencias
 - Monitorea el uso de almacenamiento del directorio `videos/`
+- La aplicación muestra un diálogo de confirmación al cerrar para evitar cierres accidentales
+
+## Limitaciones
+
+- La aplicación requiere una conexión estable a internet para acceder a los streams RTSP.
+- El rendimiento puede verse afectado con múltiples cámaras de alta resolución.
+- La detección de movimiento puede tener falsos positivos en entornos con cambios de iluminación o movimiento constante.
+- **Audio**: La aplicación ahora captura audio junto con video. Requiere FFmpeg instalado. Si un stream RTSP no tiene audio, la grabación continuará solo con video.
 
 ## Licencia
 
